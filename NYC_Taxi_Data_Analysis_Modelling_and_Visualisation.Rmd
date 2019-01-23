@@ -1,0 +1,994 @@
+---
+title: "NYC Taxi Data Analysis, Modelling and Visualisation"
+author: "Lakshmi Rajasekhar"
+date: "September 4, 2018"
+output: 
+  html_document:
+    toc: yes
+---  
+2013 NYC Taxi Data Analysis, Modelling and Visualisation  
+  
+```{r include = FALSE, message=FALSE, warning=FALSE}
+# clear the environment variables
+rm(list = ls(all = T))
+
+options(width=80)
+
+#set working directory
+dir_path = "C:/Users/Lakshmi/Desktop/Elula_Aug28/Presentation_Sep4"
+setwd(dir_path)
+```
+
+```{r include = FALSE, message=FALSE, warning=FALSE}
+## Required R libraries
+#library(data.table)  
+library(dplyr)      # data pre-processing
+library(lubridate)  # datetime preprocessing
+library(ggplot2)    # visualisations
+library(knitr)      # documentation related
+library(scales)     # pre processing
+library(ggmap)      # visualisation
+library(gganimate)  # graph animation
+library(caret)      # data pre-processing
+library(TTR)        # time series
+library(rpart)      # CART decision trees
+library(DMwR)
+```
+
+  
+## 1. Introduction   
+The main objective of this study is to identify potential opportunities to increase revenue and cut costs for NYC taxi companies. In 2013 in New York City, only medallion taxis (yellow taxi cabs) licensed by the Taxi and Limousine Commission (TLC), could pick-up and drop-off passengers in any of the five boroughs of NYC (although currently in 2018, there are many more + Uber).   
+The five boroughs of NYC are as shown in the figure below. Manhattan is the most densely populated of the five boroughs. The borough of Queens has two international airports, namely, John F Kennedy (JFK) and La Guardia (LGA). JFK is one of the world's busiest airports. Due to these factors, Taxi business can be profitable helping make NYC more connected.    
+  
+![NYCBoroughs](pictures/NYC_boroughs.png)  
+    
+  
+## 2. Data    
+This study uses historical data for NYC medallion taxi trips and fare data provided by Elula (public NYC data). Due to volume of the data, as suggested, this study focusses on one month of data (September 2013, random sampling choice). No major holidays or events were found that could affect usual trip patterns in September 2013. Also, the weather was noted to be pleasant (start of fall).  
+The NYC Taxi data has two files; trip details and trip fare details. The two datasets were combined to create a single dataset without duplicate variables, for ease of use. After combining, the dataset has a total of 21 variables and 14+ million trip records for September 2013.   
+The NYC government website (www.nyc.gov) lists description of most of the variables given in this dataset, as shown below. In 2013, there were two approved T_PEP (Technology Passenger Enhancements Project) vendors, namely, CMT and VeriFone Inc.  
+  
+![Attribute Description](pictures/attribute_description.png)
+    
+```{r message=FALSE, warning=FALSE}
+# # First read in the csv files using fread for fast reading and then convert to R object (.rds) for faster reloads later
+# trip_data = fread("trip_data/trip_data_9.csv", data.table = F)
+# trip_fare = fread("trip_fare/trip_fare_9.csv", data.table = F)
+# # column bind both the datasets into one dataset
+# taxi_data = cbind(trip_data, trip_fare)
+# # remove duplicate columns
+# taxi_data = taxi_data[, !duplicated(colnames(taxi_data))]
+# # save as .rds for easier read-in later
+# saveRDS(taxi_data, "taxi_data_9.rds")
+
+# Read-in .rds file 
+taxi_data = readRDS("taxi_data_9.rds")
+```
+  
+  
+## 3. Exploratory Data Analysis (EDA) and Pre-processing  
+EDA is an essential part of data science projects to understand the data further and identify data inconsistencies before performing any predictive modelling on the data.  
+   
+### i.  Structure of the Data and appropriate attribute conversions    
+First, understanding the strucure of the dataset would help us convert the attributes (variables) appropriately.   
+  
+```{r}
+str(taxi_data)
+```
+  
+```{r message=FALSE, warning=FALSE}
+# Convert appropriate attributes to categorical
+cat_attrs = c("medallion","hack_license","vendor_id", "payment_type", "store_and_fwd_flag")
+
+taxi_data[, cat_attrs] = as.data.frame(apply(taxi_data[, cat_attrs], 2, function(x) as.factor(as.character(x))))
+taxi_data$rate_code = as.factor(as.character(taxi_data$rate_code))
+  
+#convert datetimes appropriately using lubridate library
+taxi_data$pickup_datetime = ymd_hms(taxi_data$pickup_datetime)
+taxi_data$dropoff_datetime = ymd_hms(taxi_data$dropoff_datetime)
+
+# check the structure of the data again
+str(taxi_data)
+```  
+  
+  
+### ii. Data Inconsisencies and missing values  
+   
+```{r}
+summary(taxi_data)
+```  
+   
+We can point out some possible data consistencies by looking at the above summary statistics as follows:   
+1.  **pickup and dropoff latitude and longitude** - There seems to be extreme outlier values (E.g., -1213.88) which are impossible as a latitude or longitude value.There are also 78 missing NA values in dropoff variables.  
+2.  **rate_code** - Expected values for rate_code are 1 to 6 as described in the attribute description above. The data seems to have multiple rate_codes including rate_code = 0.   
+3.  **store_and_fwd_flag** - There are missing records but we will have to look at the usability of this variable before deciding to deal with missing values.  
+4.  **payment_type** - There are "DIS" type payments which mean disputed payments which might actually mean losses for the driver/taxi company as it is not clearly mentioned if the passnger paid the disputed amount or not.  
+5. **Dropoff datetime** - The maximum entry is a dropoff time for 4th of October (early hours of 1st of October are acceptable, but not this).    
+  
+Looking at each of the above data inconsistensies:    
+    
+1.  **Latitude and Longitude**    
+The latitude and longitudes data has a lot of inconsistencies, based on detailed exploration.   
+a. There are zero values and NA values in the geolocation variables. This might mostly be signal reception issues. There are 78 missing records for drop-off latitude and longitude.   
+b. Longitudes vary between -180 to 180 degrees and latitudes vary from -90 to 90 degrees. Any values beyond this can be marked as missing values too.
+c. There are also some values closer to 0 like -0.002 etc which should also be signal issue.  
+  
+```{r}
+geo_variables = c("pickup_longitude", "pickup_latitude", "dropoff_longitude", "dropoff_latitude")
+
+summary(taxi_data[,geo_variables])
+
+boxplot(taxi_data[,geo_variables])
+```  
+  
+Due to various inconsistencies noted above, I plan to find the 1.5 X IQR (inter-quartile range) of each of the coordinate variable and mark anything outside 1.5 X IQR from both first and third quartiles as NA. I guess this is a descent approach given that the data is only for NYC and 1.5XIQR from the first and third quartiles would defintely cover more than its neighbouring areas to cover for long-distance trips.  
+  
+```{r}
+# Function that accepts a vector, calculates IQR and returns row indices of the records satusfying the condition
+# condition used = (value > 1.5IQR*4th quartile) or (value< 1.5IQR * 2nd quartile)
+find_geoOutlier = function(x){
+  iqr = 1.5*IQR(x, na.rm = T)
+  qntl = quantile(x, na.rm = T)
+  y = which((!is.na(x)) & ((abs(x) < (abs(qntl[2]) - abs(iqr*qntl[2]))) | (abs(x) > (abs(qntl[4])+abs(iqr*qntl[4])))))
+  return(y)
+}
+
+# setting all values beyond these values as NA
+rows = find_geoOutlier(taxi_data$pickup_latitude)
+taxi_data$pickup_latitude[rows] = NA
+rows = find_geoOutlier(taxi_data$pickup_longitude)
+taxi_data$pickup_longitude[rows] = NA
+rows = find_geoOutlier(taxi_data$dropoff_latitude)
+taxi_data$dropoff_latitude[rows] = NA
+rows = find_geoOutlier(taxi_data$dropoff_longitude)
+taxi_data$dropoff_longitude[rows] = NA
+
+summary(taxi_data[, geo_variables])
+
+```  
+  
+ 
+  
+```{r}
+colSums(is.na(taxi_data))
+sum(is.na(taxi_data[,geo_variables]))*100/(4*nrow(taxi_data))
+```
+About 1% of data is now NA values in the geo-coordinate variables. Since the trip distance is already given, I would not be using geo-coordinates for modelling. Also, I do not plan to drop records with geo-coordinate values as NA. It might still be useful for further EDA of other variables.   
+  
+2.  **rate_code**   
+Rate codes are entered by the taxi driver during the trip. Hence, the probability of human data entry error is very high.  
+  
+```{r}
+# unique rate codes in data
+levels(taxi_data$rate_code)
+```
+
+```{r}
+# frequency table
+table(taxi_data$rate_code)
+```
+Instead of rate_codes 1 - 6, there are other values listed. I did some research online but could not confirm if the rate codes for 2013 were different from what the nyc gov website has today. It might be real rate_codes in 2013 but rate_codes like '210' and '28' looks like multiple stop trips where the taxi driver manually changes the rate_codes after each destination. For now, I just let the data be without any changes due to lack of proper information.  
+  
+3.  **store_and_fwd_flag**   
+This variable should have two two options: "Y" - to denote that the trip data was stored and then forwarded to the server when netwrok issues were restored, "N" -  to denote that trip data was sent immediately.   
+  
+```{r}
+prop.table(table(taxi_data$store_and_fwd_flag))
+```  
+   
+The table above shows more than 50% missing values. 48% of the data was collected when there were no network issues. This leads me to assume that the missing values might be a 'Y'. But imputing based on plain assumption is invalid.  
+   
+```{r warning=FALSE}
+temp = taxi_data[taxi_data$store_and_fwd_flag == "",]
+#summary(temp)
+cat("Distribution when no network connection")
+table(temp$payment_type)
+
+temp = taxi_data[taxi_data$store_and_fwd_flag == "N",]
+#summary(temp)
+cat("Distribution when network connection is intact")
+table(temp$payment_type)
+```  
+I studied the summary statistics of NYC data seperated into two sets based on store_an_fwd_flag == 'N' and "" (missing). I was expecting to see more data inconsistencies in the other variables (like lat and long) in the "" group than the "N" group. Although that was not the case, one striking observation I had was with the 'payment_type' variable:
+1. With network issues, there are more 'UNK' (unknown payments) and less 'NOC' (no charges).  
+2. Without network issues, there are more 'NOC' and zero 'UNK'.  
+  
+Although it is difficult to make conclusions, it might be because cash payments are recorded as 'UNK' during network connection issues.  
+Overall I feel this variable is not that useful from modelling perspective but might be useful from exploration and cleaning perspective. Hence keeping the variable for now.   
+   
+4.  **Dropoff datetime**   
+  
+```{r}
+taxi_data[(month(taxi_data$dropoff_datetime)>9 & day(taxi_data$dropoff_datetime)>1),]
+```
+    
+Looking at the data, there is only one record which has a dropoff date of 4th of October. This is unusual given that the pickup date is 23rd of September. This might be a data entry error. Rest of the data which has dates in October are in the early hours of 1st of October with a pickup on 30th of Spetember which are valid entries. Dropping records/variables during EDA might affect the analysis itself and hence not making any decision to drop them till data modelling.       
+  
+  
+### iii.  Other Interesting Summary Statistics   
+   
+```{r}
+cat("Total number of yellow taxis in September 2013: ", length(unique(taxi_data$medallion)))
+
+cat("\nTotal number of yellow taxi drivers in September 2013: ", length(unique(taxi_data$hack_license)))
+```   
+    
+### iv. Feature Engineering  
+This section lists all the new attributes derived from existing data based on observations while doing the EDA and modelling (iteratively added them here as and when required). I decided to put all the newly created attributes in one section for easy reference later.  
+  
+```{r echo = TRUE, results = 'hide'}
+# 'f' in attribute names denotes 'newly created feature'. A convention I am following to keep track of engineered features.
+
+# Extract the day of the week  
+taxi_data$fWeekday = factor(weekdays(taxi_data$pickup_datetime), levels = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday","Sunday"))
+# Extract day (day of the month)
+taxi_data$fDay = day(taxi_data$pickup_datetime)
+# Extract hour from time
+taxi_data$fHour = hour(taxi_data$pickup_datetime)
+# Extract Weekday or Weekend identifier
+taxi_data$fWendOrWday = ifelse(taxi_data$fWeekday == "Saturday", "Weekend", ifelse(taxi_data$fWeekday== "Sunday", "Weekend", "Weekday"))
+
+```  
+  
+### v.  Exploratory Data Analysis (based on given questions)  
+  
+**EDA Q1: Busiest Locations and Hours**   
+Since location of pickup and dropoff is not given, mapping lat and long coordinates back to the five boroughs of NYC would be a tedious task. In the interest of time, I plan to visually analyse the busy locations based on time of day and day of week for various trips.  
+  
+*Volume of Trips*   
+  
+```{r fig.height=50, fig.width=10, message=FALSE, warning=FALSE}
+# combine pickup and dropoff latitudes and longitudes into long format data for plotting
+temp_pickup = taxi_data %>% select(pickup_longitude, pickup_latitude, fHour, fWeekday) %>% rename(longitude = pickup_longitude , latitude = pickup_latitude) %>% mutate("Pickup_Dropoff" = "pickup")
+temp_dropoff = taxi_data %>% select(dropoff_longitude, dropoff_latitude, fHour, fWeekday)  %>% rename(longitude = dropoff_longitude , latitude = dropoff_latitude) %>% mutate("Pickup_Dropoff" = "dropoff")
+
+#Bind them into a single dataframe before plotting lat and long coordinates
+temp = rbind(temp_pickup, temp_dropoff)
+rm(temp_dropoff, temp_pickup)
+
+nyc_map = get_map("New York City", maptype='roadmap', zoom = 11, source="google", color = "bw")
+```  
+  
+The day of week for the below animation is chosen as "Monday" for better visibility.  
+  
+```{r fig.height=50, fig.width=10, message=FALSE, warning=FALSE}
+#Animation of trips based on hour of day and day of week
+temp1 = temp[temp$fWeekday == "Monday",]
+p = ggmap(nyc_map) + geom_point(aes(x = longitude, y = latitude, colour = Pickup_Dropoff), data = temp1, size=.001, alpha=0.9) +
+  scale_fill_manual(values = c(pickup = "green4", dropoff = "tomato3")) + labs(x = "Longitude", y = "Latitude", title = "NYC Taxi Pickup/Dropoff for September 2013", subtitle  = 'Hour: {frame_time}') +
+  facet_grid(fWeekday~Pickup_Dropoff) + theme(legend.position="bottom") + transition_time(fHour) 
+
+animate(p)
+anim_save("sample_anim")
+```   
+
+```{r warning= FALSE, fig.height=30, fig.width=10}
+# Plot for Hour = 1
+temp1 = temp[temp$fHour == 1,]
+p = ggmap(nyc_map) + geom_point(aes(x = longitude, y = latitude, colour = Pickup_Dropoff), data = temp1, size=.001, alpha=0.9) +
+  scale_fill_manual(values = c(pickup = "green4", dropoff = "tomato3")) + labs(x = "Longitude", y = "Latitude", title = "NYC Taxi Pickup/Dropoff for September 2013 from 1:00 - 2:00am") + facet_grid(fWeekday~Pickup_Dropoff) + theme(legend.position="bottom")
+p
+```  
+    
+The above figures and animation shows that the whole of Manhattan is always busy. Any day, any time - a taxi driver in the Manhattan area will always have trips. The northern parts of Brooklyn and Queens are also busy, especially around the LaGuardia Airport. There are also steady traffic to and from JFK Airport in the south of Brooklyn. Staten Island has the least amount of trips. Western part of Bronx, adjacent to Manhattan also has trips. There are also some taxi trips in the Newark area (especially Jersey City).     
+    
+*Trips by Hour of Day*  
+   
+```{r message=FALSE, warning=FALSE}
+temp_hour = taxi_data %>% group_by(fHour) %>% summarise("Total_trips" = n())
+
+ggplot(temp_hour, aes(x = fHour, y = Total_trips)) + geom_bar(stat = 'identity') + labs(title="Hourly NYC Taxi Trips", x="Time (in hours)",y = "Total no: of trips") + geom_hline(aes(yintercept = mean(Total_trips)), colour = 'red', linetype = "dashed")+annotate(geom="text", x=1, y=620000, label="Mean = 587820.5", color="red", size = 4)+ scale_x_continuous(breaks = c(0:23))
+```   
+  
+The above plots shows that the morning rush hour is spread out and continues to afternoon lunch rush hour. There are sudden drops in trip numbers from 5:00-6:00 in the morning and from 4:00 - 5:00 in the evening. This looks like it corresponds to driver shift changes in the day. Assuming the 4:00pm trips are similar in numbers to 3:00pm and 5:00pm, there are a lot of unmet demand during this time. The evening rush hour is shorter in duration and peaks around 7:00pm in the night.  
+    
+*Hourly Trips groups as Weekday or Weekend*   
+   
+```{r message=FALSE, warning=FALSE}
+temp_day = taxi_data %>% group_by(fDay, fHour, fWendOrWday) %>% summarise("Total_trips" = n())
+
+ggplot(temp_day, aes(x = fHour, y = Total_trips, group = fDay, colour = fWendOrWday)) + geom_point() + geom_line()+ labs(title="Hourly trips by Weekday/Weekend", x="Time (in hours)",y = "Total trips") + scale_x_continuous(breaks = c(0:23))
+```  
+   
+There are clearly different travel patterns during the weekday and the weekend. This is very useful for any taxi company to schedule and optimise their driver shifts. Some of the useful observations are:   
+  * On a weekday, work trips start early peaking around 8:00am. In contrast weekends show a slow morning and trips peaking around noon - 1:00pm.   
+  * Night trips are very high for Weekdays. My guess is that more people might be taking public transport in the morning than in the night.    
+  * Weekend night trips show a completely different pattern. One patterns indicates trips as high as any weekday trips and increasing (I am guessing it is for Saturdays). Another pattern shows people retiring early and trips dropping drastically after 7:00pm.    
+  * Early morning has higher number of trips over the weekends (possibly people getting back home after partying).     
+   
+*Hourly Trips groups as Weekday or Weekend*   
+   
+For more clarity, I divided the above plot again based on which day of the week it is.  
+```{r}
+temp_day = taxi_data %>% group_by(fWeekday, fHour) %>% summarise("Total_trips" = n())
+
+ggplot(temp_day, aes(x = fHour, y = Total_trips, group = fWeekday, colour = fWeekday)) + geom_point() + geom_line()+ labs(title="Hourly trips by day of week", x="Time (in hours)",y = "Total trips") + scale_x_continuous(breaks = c(0:23))
+```  
+   
+The above plot confirms that Saturdays have high night trips. Saturday early mornings trips are also high denoting an active Friday night life in NYC. Surpirsingly, Mondays have a higher than normal afternoon and night trips (compared to other weekdays).   
+    
+*Trips by Day of Week*  
+    
+```{r warning= FALSE}
+temp_day = taxi_data %>% group_by(fWeekday) %>% summarise("Total_trips" = n())
+
+ggplot(temp_day, aes(x = fWeekday, y = Total_trips)) + geom_bar(stat = 'identity', width = 0.5, fill = "darkolivegreen") + labs(title="NYC Taxi Trips by Day-of-week", x="Day of Week",y = "Total no: of trips")+ geom_hline(aes(yintercept = mean(Total_trips)), colour = 'red', linetype = "dashed")+annotate(geom="text", x=4, y=2100000, label="Mean = 2015385", color="red", size = 4)
+
+```  
+   
+Trips are the highest on Sundays with higher than average number of trips over the weekend. Fridays and Mondays also show a higher number. Higher Friday trips maybe due to Friday night trips as confirmed from the previous plot. It would be interesting to look at why Mondays have a higher than normal number of afternoon - night trips.   
+Volume of trips is highest over the weekends and any taxi company in the NYC taxi market should have taxis runnings during this time to maximize revenue.   
+    
+```{r include = FALSE}
+rm(temp_day, temp_hour, temp1)
+```
+   
+     
+** EDA Q2: Distribution of passengers per trip, payment type, fare and tip amounts**    
+   
+*Distribution of passengers per trip*   
+
+Looking at the frequency table for the passenger counts, most the NYC yellow cab trips are single passenger trips. There are some zero passenger trips which might be data entry errors by the taxi driver.   
+  
+```{r}
+table(taxi_data$passenger_count)
+```
+  
+Passenger counts greater than 6 are rare. passenger count of 208 is definitely a data entry error.  
+```{r echo = FALSE}
+taxi_data[taxi_data$passenger_count ==208, ]
+```
+   
+Looking closely at the two records with 208 passenger_counts, we can find that it is by the same driver and the other attributes corresponding to these records look erronous as well. Hence, dropping these two records from the dataset.   
+```{r}
+taxi_data = taxi_data[-which(taxi_data$passenger_count ==208), ]
+```  
+   
+```{r results='asis', message=FALSE, warning=FALSE}
+temp = taxi_data %>% group_by(passenger_count) %>% summarise(count = n()) %>% mutate(percentage=count/sum(count))
+
+colnames(temp) = c("No_of_Passengers", "Count_of_Passengers", "Percentage")
+
+brks = seq(.10,1,.10)
+ggplot(temp, aes(x = as.factor(as.character(No_of_Passengers)), y = Percentage*100)) +
+  geom_bar(stat = "identity",fill = I("deeppink4"))+
+  scale_y_continuous(breaks = brks*100, labels = scales::percent(brks), limits = c(0,100)) + xlab(label = "No of Passengers per Trip") +
+  ylab(label = "Percentage")+geom_text(aes(label=scales::percent(Percentage)), position=position_dodge(), vjust=-0.25)
+```  
+  
+```{r echo = FALSE}
+taxi_data[taxi_data$passenger_count ==0, ]
+```
+  
+Looking at the data for passenger_count = 0, it could be a data entry error or it could be erroneous records altogether. More detailed study is required to figure out which records are wrong. For example, some of the records with passenger count = 0 looks real data but some others have a lot of unusal values also like trip_time = 0 and trip_distance = 0 etc. I would need to look at trip_distance and trip_time variables more closely later on.     
+   
+Next, I wanted to look at the distribution of passenger_counts based on Weekday/Weekend. I groups passenger_counts into three groups - single, group(2+), UNK (0 passenger_counts).    
+    
+```{r results='asis',echo = FALSE, message=FALSE, warning=FALSE}
+temp = taxi_data %>% select(passenger_count, fWendOrWday)
+
+# categorise into single passenger or group trips
+temp$trip_type = ifelse(temp$passenger_count == 1, "single", ifelse(temp$passenger_count== 0, "UNK", "group"))
+
+temp = temp %>% group_by(fWendOrWday, trip_type) %>% summarise(count = n()) %>% mutate(percentage=count/sum(count))
+
+brks = seq(.10,1,.10)
+ggplot(temp, aes(x = as.factor(as.character(trip_type)), y = percentage*100)) +
+  geom_bar(stat = "identity")+
+  scale_y_continuous(breaks = brks*100, labels = scales::percent(brks), limits = c(0,100)) + xlab(label = "No of Passengers per Trip") + facet_wrap(~fWendOrWday) + ylab(label = "Percentage")+geom_text(aes(label=scales::percent(percentage)),
+position=position_dodge(), vjust=-0.5)
+```  
+  
+Group trips over the weekend goes up a bit but since the trip numbers are in millions, it is definitely significant. This shows that people like to go in groups over the weekend (with family, friends etc). This is a significant point for taxi  companies trying to increase their revenue. They can schedule more fleet over the weekends and optimise the driver shift times according to the peak trip volumes seen in the previous section.   
+   
+*Distribution of payment type*   
+Payment type shows the general payment preference of people.  
+  
+```{r results='asis',echo = FALSE, message=FALSE, warning=FALSE}
+temp = taxi_data %>% group_by(payment_type) %>% summarise(count = n()) %>% mutate(percentage=count/sum(count))
+
+brks = seq(.10,1,.10)
+ggplot(temp, aes(x = as.factor(as.character(payment_type)), y = percentage*100)) +  geom_bar(stat = "identity",fill = I("deeppink4"), colour = I("black"), width = 0.5)+
+  scale_y_continuous(breaks = brks*100, labels = scales::percent(brks), limits = c(0,100)) + xlab(label = "Payment Type") +
+  ylab(label = "Percentage")+geom_text(aes(label=scales::percent(percentage)), position=position_dodge(), vjust=-0.25)
+
+```   
+  
+About 55% of people prefer card payments closely followed by card payments. I am expecting the actual card payment preference to be a little more higher than this as I believe people are forced to pay by cash in times of network connection issues.  There are about 0.2% no charge payment type. Considering the actual trip numbers, I expected this number to be lower than it currently is. So many NOC trips are really suspicious. Assuming that the drivers need to pay some persentage amount to the taxi companies, it could be that drivers record the payment type as NOC for cash payments during network errors.   
+    
+*Distribution of Total Fare*   
+    
+```{r results='asis', message=FALSE, warning=FALSE}
+# Sanity check for data errors
+# taxi_data[taxi_data$total_amount<0,]  #0 records with negative amounts
+
+cat("Mean amount per trip:", mean(taxi_data$total_amount))
+# 15.23923
+
+#plot
+ggplot(taxi_data, aes(x = total_amount)) + coord_cartesian(xlim = c(0, 100)) +
+  geom_histogram(binwidth = 10, aes(fill = I("darkgreen"), colour = I("black"))) + labs(x = "Total amount ($)", y = "Trip Count", title = "Distribution of Total Fare")
+```  
+   
+The mean amount earned per trip is around $15. The histogram above shows the distribution of the total fare. There are some high high earning trips which I guess are either airport (JFK) or Jersey City trips where there are flat rates + surcharges. It could also be just longer distance trips.  
+   
+*Total fares based on time*     
+**(EDA Q3: Distribution of Trips by Time and Fare)**  
+   
+```{r}
+ggplot(taxi_data, aes(x = trip_time_in_secs, y = total_amount, colour = fWendOrWday)) + geom_point() +theme(legend.position = "bottom") + labs(x = "Trip time (in sec)", y = "Total Fare ($)", title = "Distribution of Trips by Time and Total Fare (based on weekday/weekend)")
+```  
+  
+This is an interesting graph because it shows that the price does not increase with time. This means, the fares for NYC taxi trips are calculated based on distance and not time spent in transit. This can be especially disadvantageous in cities like NYC where traffic volume determines the trip time.  There are also some outlier values like very high trip amount for insignificant trip time. There also seems to be a second line around the $50 mark. This suggests trips with certain rate_codes having flat charges. Also, people seems to be willing to pay more for similar time trips over the weekdays than over the weekends. But overall, there does not seem huge variations between weekdays and weekends. Maybe colouring with repect to rate_code might be useful.      
+  
+  
+```{r}
+ggplot(taxi_data, aes(x = trip_time_in_secs, y = total_amount, colour = rate_code)) + geom_point() +theme(legend.position = "bottom") + labs(x = "Trip time (in sec)", y = "Total Fare ($)", title = "Distribution of Trips by Time and Total Fare (based on rate_code)")
+```
+  
+*Total fares based on trip time*    
+```{r}
+ggplot(taxi_data, aes(x = trip_distance, y = total_amount, colour = fWendOrWday)) + geom_point() +theme(legend.position = "bottom") + labs(x = "Trip distance (in miles)", y = "Total Amount ($)", title = "Total fares based on trip distance")
+```  
+   
+This graph confirms the assumption in the previous graph that NYC taxi trips are charged based on distance only and not time. This also shows the trips with flat charges close to $50 (could be airport trips). This also seems to have a lot of possible outlier values which would need to be removed before modelling for fare (huge trip amounts for insignificant trip distance, insignificant trip amounts for high distance trips). This also shows the pattern that people are willing to pay more on the weekdays than over the weekends. It would be inetresting to see the tipping patterns over weekdays/weekends too.  
+  
+*Distribution of Total amount based on day of the week*   
+  
+```{r}
+ggplot(taxi_data, aes(x = fWeekday, y = total_amount)) + geom_boxplot(aes(fill = fWeekday)) +theme(legend.position = "none") + coord_cartesian(ylim = c(0, 30))
+```    
+There does not seem to be a significant different between total amounts based on day of the week. This shows that although weekend trips are higher than weekday trips, people's willingness to spent differs. There are also a lot of 'high' amounts trips which extends way beyond the usual range. The y axis limits are adjusted to clearly visualise the boxplots.  
+    
+*Total Revenue by day of week*  
+   
+```{r warning= FALSE}
+temp = taxi_data %>% group_by(fWeekday) %>% summarise("Total_amount" = sum(total_amount))
+
+ggplot(temp, aes(x = fWeekday, y = Total_amount)) + geom_bar(stat = 'identity', width = 0.5, fill = "darkolivegreen") + labs(title="Total Revenue from NYC Taxi Trips by Day-of-week", x="Day of Week",y = "Total revenue")+ geom_hline(aes(yintercept = mean(Total_amount)), colour = 'red', linetype = "dashed")+annotate(geom="text", x=4, y=31712911, label="Mean = 30712911", color="red", size = 4)
+
+```  
+The total number of trips are higher than mean for Monday, Friday, Saturday and Sunday (previous section on trip volumes). The total revenue for Monday, Friday and Sunday are higher than the mean as expected but ironically the trip revenue is a bit lower than mean for Saturdays!  
+   
+*Total amount vs rate_code*  
+  
+```{r}
+ggplot(taxi_data, aes(x = rate_code, y = total_amount)) + geom_boxplot(aes(fill = rate_code)) +theme(legend.position = "none")+ labs(x = "Rate Code", y = "Total Amount ($)", title = "Total amount based on rate code")
+```  
+  
+Rate code = 1 is the standard rate based on distance and the revenue is one of the least. Also rate code = 6 which denotes group rides have lower revenues. This shows that group ride pricing does not favour taxi companies and drivers. Rate code = 2 denoting JFK airport has high revenue. It also has some lower than expected revenues. I am assuming that trips towards JFK are higher priced as it becomes the rider's necessisity. But once the driver is in JFK, he needs a return trip and then it becomes the driver's necessisity driving the prices down. Rate code = 5 denotes negotiated fare and this has very high variability.  
+   
+*Total amount vs hour and day*  
+  
+```{r}
+temp =  taxi_data %>% group_by(fWeekday, fHour) %>% summarise("mean_earning" = mean(total_amount))
+
+ggplot(temp, aes(x = fHour, y = mean_earning, colour = fWeekday, group = fWeekday)) + geom_point() + geom_line()+ labs(x = "Pickup Hour", y = "Mean Amount ($)", title = "Mean fares based on pickup time")
+```  
+  
+There revenue at 5:00am and 4pm are unusually high and this corresponds to possible driver shift changes leading to higher demand than car availability. This also shows the unusually lower revenue for Saturday trips. It would be interesting to explore the data further for a reason.    
+  
+*Distribution of Tip Amount*    
+    
+```{r results='asis',echo = FALSE, message=FALSE, warning=FALSE}
+ggplot(taxi_data, aes(tip_amount)) + geom_histogram() + coord_cartesian(xlim = c(0, 20))
+```  
+  
+Majority of the tips are observed to be around $1-3.  
+   
+*Tip vs rate_code*  
+```{r}
+ggplot(taxi_data, aes(x = rate_code, y = tip_amount)) + geom_boxplot(aes(fill = rate_code)) +theme(legend.position = "none")+coord_cartesian(ylim = c(0, 50))
+```  
+  
+Tips are higher for JFK (rate_code = 2), Newark (rate_code = 3)and Nassau and Westchester (rate_code = 4) possibly due to distance (and hence higher total amounts). JFK also has some unusally high tips! Interestingly, tip is also higher for negotiated rates (rate_code = 5). This implies, most of the negotiated charge trips are also longer distance trips. Tips for group rides (rate_code = 6) are the lowest.     
+    
+*Tip vs payment type*  
+  
+```{r}
+ggplot(taxi_data, aes(x = payment_type, y = tip_amount)) + geom_boxplot(aes(fill = payment_type)) +theme(legend.position = "none")+coord_cartesian(ylim = c(0, 20))
+```   
+   
+This plot reinforces my assumption that tips are usually not recorded for cash payments by the drivers. As expected, disputed and no charge rides (possibly unrecorded cash payments) have close to zero tips. Most of UNK trips also display the same pattern as card payment trip tips.    
+  
+**(EDA Q4: Characterisation of drivers by working hours and earnings)**  
+   
+The dataset includes some sensitive information like medallion number (identifies taxis) and hack_license number (identifies driver). Eventhough these might not be actual numbers, they still represent unique identities. Hence, it is possible to track taxis and drivers in combination with the geo-spatial longitude and latitude information given. Also, since trip fare details are given, we can even figure out approximately how much each driver/taxi company earns per day/month.   
+  
+```{r}
+cat("Total unique taxi driver in Spetember 2013: ",length(unique(taxi_data$hack_license))) #33338
+
+cat("Total unique taxis in Spetember 2013: ",length(unique(taxi_data$medallion))) #13437
+```  
+  
+```{r}
+#Summary of hack_licenses (driver)
+#summary(taxi_data$hack_license)
+temp = taxi_data %>% group_by(hack_license) %>% summarise("total_trips" = n()) %>% arrange(desc(total_trips))
+
+ggplot(temp, aes(x = 1:nrow(temp), y = total_trips)) + geom_bar(stat = 'identity') + labs(title="Distribution of driver trips", x="various drivers",y = "Total trips")+ geom_hline(aes(yintercept = mean(total_trips)), colour = 'red', linetype = "dashed")+annotate(geom="text", x=20000, y=500, label="Mean = 423", color="red", size = 4)
+```  
+  
+The mean trips in a month for the taxi drivers is around 432 trips. Most of the drivers seems to work full-time with total trips way more than the mean trips. I think the graph suggests that there is more demand for taxis than taxis on the ground.   
+  
+
+```{r}
+temp = taxi_data %>% group_by(hack_license) %>% summarise("total_revenue" = sum(total_amount)) %>% arrange(desc(total_revenue))
+
+ggplot(temp, aes(x = 1:nrow(temp), y = total_revenue)) + geom_bar(stat = 'identity') + labs(title="Distribution of driver earnings", x="various drivers",y = "Total trips")+ geom_hline(aes(yintercept = mean(total_revenue)), colour = 'red', linetype = "dashed")+annotate(geom="text", x=20000, y=8000, label="Mean = 6448.809", color="red", size = 4)
+```  
+  
+This plot follows the same pattern as total trips per driver. This is also logical that the driver earn based on their number of trips taken.   
+   
+
+```{r}
+# Choosing one random driver for further analysis
+# 6D3F364C51D18E1D4A077F53B9096166
+driver_data = taxi_data[taxi_data$hack_license == "6D3F364C51D18E1D4A077F53B9096166",]
+
+cat("Driver Characterisation")
+cat("\n========================")
+cat("\nDriver License Number: 6D3F364C51D18E1D4A077F53B9096166")
+cat("\n----------------------------------")
+cat("\nTotal trips in September 2013: ", nrow(driver_data))
+cat("\n----------------------------------")
+cat("\nTotal taxis used for trips: ",length(unique(driver_data$medallion)))
+cat("\n----------------------------------")
+cat("\nTotal earnings for September 2013: ", sum(driver_data$total_amount))
+cat("\n----------------------------------")
+cat("\nTotal amount earned in tips for September 2013: ", sum(driver_data$tip_amount))
+cat("\n----------------------------------")
+```  
+  
+**Which days does this driver work more**    
+  
+```{r}
+temp = driver_data %>% group_by(fWeekday) %>% summarise("Total_amount" = sum(total_amount))
+
+ggplot(temp, aes(x = fWeekday, y = Total_amount)) + geom_bar(stat = 'identity', width = 0.5, fill = "darkolivegreen") + labs(title="Driver revenue by day of week", x="Day of Week",y = "Total revenue")+ geom_hline(aes(yintercept = mean(Total_amount)), colour = 'red', linetype = "dashed")+annotate(geom="text", x=4, y=2000, label="Mean = $1904.167", color="red", size = 4)
+```  
+  
+The figure above shows that this driver is a well-seasoned driver who knows the NYC demand well. This driver seems to work everyday but more over the weekends and less towards midweek. At the same time, it is sadenning to know that he does not take any day off during the week (possibly the story of many other NYC drivers).  
+    
+**Driving pattern for September 2013**  
+   
+```{r}
+temp = driver_data %>% group_by(fDay, fHour) %>% summarise("total_trips" = n())
+
+# making a time series suitable data frame
+dateSeq = data.frame("fDay"=rep(1,24), "fHour" = rep(seq(1,24,1),30))
+temp_merged = merge(dateSeq, temp, by = c("fDay", "fHour"), all.x=T)
+# replacing all non-working hour trips as 0
+temp_merged[which(is.na(temp_merged$total_trips)), "total_trips"] = 0
+# time series data format
+temp_ts = ts(temp_merged$total_trips, frequency = 24)
+#plot
+plot(temp_ts,xlab="Hours and date for September 2013",ylab="Total trips", main="Total trips vs time")
+```  
+  
+Analysing the above graph, this driver works more on alternate days. This driver alternates between 2trips/hour and 3trips/hour on alternate days. He also took a break from driving for around 10 days.  
+  
+**Total earnings based on hour of day and day of month**  
+  
+```{r}
+temp =  driver_data %>% group_by(fDay, fHour, medallion) %>% summarise("total_earning" = sum(total_amount))
+
+ggplot(temp, aes(fDay, fHour, fill = total_earning)) + 
+  geom_tile(colour = "white") + 
+  labs(x="Date",y="Hour of Day",title = "Driver Hourly Earning per Day") +scale_x_continuous(breaks = c(1:30))
+```   
+  
+The above plot gives a clear picture of the earning pattern of the driver per hour per day. This also shows that he moslty takes the morning shifts. It also shows that atleast 1 day a week, he workds extra during the night. This driver usually takes (or gets) shifts of approximately 10 hours. On the day he works extra, he takes around 7 hours break for rest. Hence, this is a responsible driver and takes adequate rests. It might be that the driving pattern of this driver is heavily influenced by the taxi he gets to rent for the day.      
+   
+**Does the driver work days or nights more**   
+   
+```{r}
+temp =  driver_data %>% group_by(fHour) %>% summarise("total_trips" = n())
+
+ggplot(temp, aes(x = fHour, y = total_trips)) + geom_point() + geom_line()+ labs(x = "Pickup Hour", y = "Total Amount ($)", title = "Total earnings based on Hour for September 2013")+ theme(legend.position="bottom") +scale_x_continuous(breaks = c(1:24))
+```  
+   
+
+**Which car did the driver use and when?**  
+  
+```{r}
+temp =  driver_data %>% group_by(fDay, fHour, medallion) %>% summarise("total_earning" = sum(total_amount))
+dateSeq = data.frame("fDay"=rep(1,24), "fHour" = rep(seq(1,24,1),30))
+temp_merged = merge(dateSeq, temp, by = c("fDay", "fHour"), all.x=T)
+temp_merged[which(is.na(temp_merged$total_earning)), "total_earning"] = 0
+
+ggplot(driver_data, aes(x = pickup_datetime, y = total_amount, colour = medallion, group = fDay)) + geom_point() + geom_line()+ labs(x = "Pickup Hour", y = "Total Amount ($)", title = "Total earnings based on pickup time")+ theme(legend.position="bottom",axis.text.x = element_text(angle = 90, hjust = 1))+scale_x_datetime(date_breaks = "1 day", labels = date_format("%b %d"))
+```  
+
+```{r}
+ggplot(temp, aes(fDay, fHour, fill = total_earning)) + 
+  geom_tile(colour = "white") + 
+  labs(x="Date",y="Hour of Day",title = "Driver Hourly Earning per Day")
+```   
+  
+This driver seems to drive 9 different taxis probably based on which taxi is available for renting. This leads me to believe that her/his break days might not be by choice. Also, this driver seems to drive more during the daytime and less to nill during the nights.  
+   
+**Locations serviced by this driver**   
+   
+```{r warning= FALSE, fig.height=20, fig.width=10}
+# combine pickup and dropoff latitudes and longitudes into long format data for plotting
+temp_pickup = driver_data %>% select(pickup_longitude, pickup_latitude, fHour, fWeekday) %>% rename(longitude = pickup_longitude , latitude = pickup_latitude) %>% mutate("Pickup_Dropoff" = "pickup")
+temp_dropoff = driver_data %>% select(dropoff_longitude, dropoff_latitude, fHour, fWeekday)  %>% rename(longitude = dropoff_longitude , latitude = dropoff_latitude) %>% mutate("Pickup_Dropoff" = "dropoff")
+
+temp = rbind(temp_pickup, temp_dropoff)
+rm(temp_dropoff, temp_pickup)
+
+p = ggmap(nyc_map) + geom_point(aes(x = longitude, y = latitude, colour = Pickup_Dropoff), data = temp, size=1, alpha=0.9) + labs(x = "Longitude", y = "Latitude", title = "Pickup locations serviced by this driver") +
+  facet_wrap(~Pickup_Dropoff, ncol = 1) + theme(legend.position="bottom")
+p
+```  
+  
+Like most NYC taxi drivers, he drives mainly in the Manhattan area. He has some JFK airport pickups but no dropoffs in JFK for the whole month. There are also some pickup points in the Newark side which leads me to believe that he might be living (or he picks up vehicles to rent) near Newark.   
+    
+**Q7. If you were a taxi owner, how would you maximize your earnings in a day?**  
+
+Average income for a taxi driver can be defined as:  
+
+$$Average\;Income = Average\;revenue\;per\;hour\;\;*\;\;total\;hours\;worked$$ 
+  
+To find average revenue per hour, let us look group the data based on day of week and hour of day to understand the earning patterns per hour throughout the week.  
+  
+```{r}
+temp =  taxi_data %>% group_by(fWeekday, fHour) %>% summarise("average_earning" = mean(total_amount))
+
+ggplot(temp, aes(fWeekday, fHour, fill = average_earning)) + scale_fill_gradient(low="gray", high="darkred") + geom_tile(colour = "wheat") + 
+  labs(x="Day of week",y="Hour of Day",title = "Average Hourly Revenue by Day of Week") +scale_y_continuous(breaks = c(0:23))
+```   
+
+The plot shows that the weekends have as a slightly different pattern than the weekedays  
+  
+```{r}
+temp =  taxi_data %>% group_by(fWeekday, fHour) %>% summarise("average_taxis" = mean(length(unique(medallion))))
+
+ggplot(temp, aes(fWeekday, fHour, fill = average_taxis)) + scale_fill_gradient(low="red", high="darkblue") + geom_tile(colour = "wheat") + 
+  labs(x="Day of week",y="Hour of Day",title = "Average Taxi Numbers by Hour and Day of Week") +scale_y_continuous(breaks = c(0:23))
+```   
+  
+This plot confirms that price is driven by supply of taxis (comapring with the previous chart). There is a huge decrese in total taxi numbers from 2am to 6am. Consequntly, the average revenue is highest during 4am to 6am.   
+Average revenue per hour changes with locations and neighbourhoods and type of trip taken (long-distance, short-distance). Since location is not given, we can cluster the pickup points based on average earnings and hence use cluster numbers to represent location. Pickup longitude and latitude is used for clustering as dropoff latitudes and longitudes might not be accurate as seen in earlier sections.   
+  
+```{r warning=FALSE}
+set.seed(847)
+temp = na.omit(taxi_data[, c("pickup_longitude", "pickup_latitude")])
+borough_cluster = kmeans(temp[, c("pickup_longitude", "pickup_latitude")], 10, nstart = 5)
+
+temp$flocationID = borough_cluster$cluster
+
+taxi_data$flocationID[which(!is.na(taxi_data$pickup_longitude))] = borough_cluster$cluster
+```  
+  
+
+```{r warning=FALSE}
+ggmap(nyc_map) + geom_point(data = taxi_data, aes(pickup_longitude, pickup_latitude, color = as.factor(flocationID)), size = 0.001, alpha = 0.5)+labs(x = "Longitude", y = "Latitude", title = "Locations clusters")+ theme(legend.position="bottom")
+```  
+
+```{r fig.width=10, fig.height=15}
+temp =  taxi_data %>% group_by(flocationID, fWeekday, fHour) %>% summarise("average_revenue" = mean(total_amount))
+
+ggplot(temp, aes(fWeekday, fHour, fill = average_revenue)) + scale_fill_gradient(low="yellow", high="darkred") + geom_tile(colour = "wheat") + facet_wrap(~flocationID, ncol = 2)+
+  labs(x="Day of week",y="Hour of Day",title = "Average Hourly Revenue by Day of Week and Location") +scale_y_continuous(breaks = c(0:23))
+```   
+  
+The above plots shows that although the total number of trips are highest in Manhattan area, the revenue is low.  
+  
+
+```{r}
+temp =  taxi_data %>% group_by(flocationID, fWeekday) %>% summarise("average_revenue" = mean(total_amount), "average_trips" = mean(n()))
+
+p1 = ggplot(temp, aes(flocationID, average_revenue, fill = fWeekday, group = fWeekday)) + geom_bar(stat = "identity")+ labs(x="LocationID",y="Average Revenue",title = "Average Revenue by Day of Week and Location") +scale_x_continuous(breaks = c(0:23))+ theme(legend.position="bottom")
+
+p2 = ggplot(temp, aes(flocationID, average_trips, fill = fWeekday, group = fWeekday)) + geom_bar(stat = "identity")+ labs(x="LocationID",y="Average Trips",title = "Average Trips by Day of Week and Location") +scale_x_continuous(breaks = c(0:23))+ theme(legend.position="bottom")
+
+require(gridExtra)
+grid.arrange(p1, p2, ncol=2)
+```   
+
+```{r include=FALSE}
+#convertdatatypes appropriately
+taxi_data$fHour = as.factor(as.character(taxi_data$fHour))
+taxi_data$fWendOrWday = as.factor(as.character(taxi_data$fWendOrWday))
+taxi_data$flocationID = as.factor(as.character(taxi_data$flocationID))
+```  
+  
+  
+## 4. Data Modelling   
+  
+### Train Test Division  
+  
+The data is split into train and test datasets randomly based on stratified sampling (70:30 split).   
+```{r echo = FALSE}
+# set a random seed and split into train and test
+set.seed(5645)
+train_rows = taxi_data$fare_amount %>% createDataPartition(p = 0.7, list = FALSE)
+train_data = taxi_data[train_rows, ]
+test_data = taxi_data[-train_rows, ]
+rm(train_rows)
+```  
+  
+Medallion numbers and hack_licenses are unique codes which are not useful for predicting fare fare and tip amounts. Hence, they are not included in the modelling part. Also, variables like geo-cordinates, surcharges, mta_tax etc are excluded as they wouldn't help with the modelling and prediction.      
+  
+```{r}
+# selecting only the required columns
+selected_columns = c("rate_code", "passenger_count", "trip_time_in_secs", "trip_distance", "fHour", "fWendOrWday", "fare_amount", "tip_amount", "payment_type", "flocationID")
+train_data = train_data[, selected_columns]
+test_data = test_data[, selected_columns]
+
+```  
+  
+Missing Values  
+```{r}
+sum(is.na(train_data))
+sum(is.na(test_data))
+```  
+There are no missing values in the data.   
+   
+### Final Data Cleaning  
+In order to simulate real test data, the data cleaning is performed after train-test split. Since a taxi trip record depends a lot on human behaviour, the possible outliers would need to be closely studied before deciding to drop it. Some of the data analysis caried out to detect the outliers and study the corretness of the records are as follows:  
+1.  trip_time - low or 0 & trip_distance - high
+2.  trip_distance - high & fare_amount - very low
+3.  trip_time - high & fare_amount - very low
+4.  trip_time - high & trip_distance - very low
+5.  trip_time - low, fare_amount - high
+   
+**Trip distance & fare amount for trip_distance = 0**  
+  
+```{r}
+temp = subset(train_data, (trip_distance>0 & trip_time_in_secs == 0))
+
+# extract where fare_amount is significant (esp. flat fares)
+temp_52 = subset(temp, (fare_amount >= 52))
+head(temp_52)
+```  
+  
+Looking closely at the data where the trip time was 0 but trip distance >0, I found many of them having huge fare_amount and looks like real records (sometimes even with tips). This is really interesting! The NYC govt. website states that the taxi fares are calculated based on mainly trip_distance and a small component of trip_time. There are also flat_fare trips. (http://home.nyc.gov/html/tlc/html/industry/taxicab_rate_yellow.shtml)      
+JFK trips have a flat rate of $52 irrespective of the distance. Here is what I think is really happening. The trip time, geo-coordinate locations etc are recorded automatically when the driver presses end trip. During airport trips like JFK, people are in a hurry. Since it is a flat rate fee, they might be wanting to finish transactions before reaching their destination. This is an interesting find as this means, there are a lot more airport trips than shown by dropoff points. This also means the data can be erronous due to such usage methods and I have to do more creative processing.  
+   
+```{r}
+# Trip patterns for 0sec travels with >0 fare amount
+temp = subset(temp, (fare_amount >=0))
+
+ggplot(temp, aes(x = trip_distance, y = fare_amount, colour= rate_code)) + geom_point() + labs(x = "Trip Distance (in miles)", y = "Fare Amount ($)", title = "Trip distance vs total trip amount for 0sec time trips")+ theme(legend.position="bottom")
+```   
+   
+These records although genuine would lead to erronous predictions as trip time and trip distance are important attributes for modelling fare and tip. Hence, dropping the records with trip time = 0 but trip distance >0 and trip fare >0  
+  
+```{r}
+train_data = subset(train_data, !(trip_time_in_secs ==0 & trip_distance >0 & fare_amount >0))
+test_data = subset(test_data, !(trip_time_in_secs ==0 & trip_distance >0 & fare_amount >0))
+```
+  
+   
+**Fare amount for trip times < 1minute**  
+  
+Also, looking at trips where the trip time is less than a minute:  
+```{r}
+temp = subset(train_data, (trip_time_in_secs < 60))
+
+ggplot(temp, aes(x = trip_time_in_secs, y = fare_amount, colour= rate_code)) + geom_point() + labs(x = "Trip time (sec)", y = "Fare Amount ($)", title = "Fare for trips with <1min trip duration")+ theme(legend.position="bottom")
+```   
+  
+Studying the above data and plots closely, the following are the discoveries:   
+  * The trip_time and geo coordinates are recorded when the driver processes the payment. 
+  * The trip_distance is only recorded at the end of the trip.  
+  * There are also flat_fare trips (E.g., rate_code = 2 for JFK Airport).
+  * Some of the minimum distance ($2.5 for first 1/5 mile) trips also look like flat_fare trips with the driver processing the payment before trip_end.  
+  * Fare for Rate_code = 5 (negotiated fares) are entered at the start of the trip itself. Most drivers mistakenly process the payment too.    
+  * Most drivers forget to stop the trip (an meter) if the payment was processed earlier (like flat_fare, min_charge and rate_code = 5 trips) leading to enormously high trip_distance records.  
+  * It also looks like different rate_codes have different trip patterns.  
+   
+```{r}
+# removing all records with trip time == 0
+train_data = subset(train_data, !(trip_time_in_secs == 0))
+test_data = subset(test_data, !(trip_time_in_secs == 0))
+```  
+  
+```{r}
+#removing data with trip distance == 0
+train_data = subset(train_data, !(trip_distance == 0))
+test_data = subset(test_data, !(trip_distance == 0))
+```  
+  
+A lot of data especially those repsenting flat fares and negotiated flat fares would be lost. But since outliers would affect the predictionability of models, omitting them. Even now a lot of incorrect records are present like when the driver forgets to stop a trip after dropoff leading to high trip_distances for minimum fare and flat fares. Ideally more detailes study would be required but in the interest of time, dropping all extreme values detected based on the below histogram.  
+  
+```{r}
+hist(train_data$trip_distance)
+```    
+  
+  
+It looks like 30 miles is a descent assumption as it would covere trips till Newark. But this would need to be studied further in combination with fare amount and trip_time to better develop outlier ranges.    
+  
+```{r}
+hist(train_data$trip_time_in_secs)
+```  
+  
+These data represents behavioural patterns in drivers as well as passengers. Ideally trip distance and trip time should be more than enough to model the fare_amount but due to all the data entry errors and driver/passenger behaviour, linear regression models might not be able to model the fare and tip amount accurately. I am expecting a non-linear ML algorithm like decision trees to model this data better.   
+  
+### **Q5. Features influencing fare and tip**  
+   
+Total trip amount can be calculated is given below:  
+  
+$$Total\;amount = Fare\;amount + surcharge + mta\;tax + tip\;amount + tolls\;amount$$  
+  
+Although NYC government websites states that fare_amount is dependent on trip_distance and trip_time, actual fare_amount depends a lot on other variables like rate_code and a combination of the various variables (from the trip behaviour analysis from the previous section).  
+  
+Strength of correlation between two numeric variables also shows their dependence on each other. Fare_amount definitely depends on trip_time and trip_distance.    
+  
+```{r}
+cat("Correlation between Fare and trip_time: ", cor(train_data$fare_amount, train_data$trip_time_in_secs))  
+cat("Correlation between Fare and trip_distance: ", cor(train_data$fare_amount, train_data$trip_distance))      
+```  
+
+As found earlier, the tip amount depends on the payment_type and various other factors.   
+```{r}
+cat("Correlation between Tip and trip_time: ", cor(train_data$trip_time_in_secs, train_data$tip_amount))   
+cat("Correlation between Tip and trip_time: ", cor(train_data$trip_distance, train_data$tip_amount))   
+```  
+  
+Usefulness of each variable can be tested using various metrics like gini index, entropy etc. Since I plan to use CART decision trees to do the base model, CART output gives gini index to represent variable importance.      
+  
+### Data Standradization   
+   
+```{r}
+std_model = preProcess(train_data[, c("trip_time_in_secs", "trip_distance")], method = c("center", "scale"))
+
+# The predict() function is used to standardize any other unseen data
+train_data[, c("trip_time_in_secs", "trip_distance")] = predict(object = std_model, newdata = train_data[, c("trip_time_in_secs", "trip_distance")])
+
+test_data[, c("trip_time_in_secs", "trip_distance")] = predict(object = std_model, newdata = test_data[, c("trip_time_in_secs", "trip_distance")])
+```  
+  
+Data standardization is important so that variables with higher scales do not unduly influcence the coefficients.  
+   
+   
+### Data Modelling for fare_amount  
+**Variable Importance and decision tree modelling for fare_amount**  
+    
+Tip is given after the trip and hence excluded from analysis for prediting fare. 
+
+#### Linear regression modelling  
+  
+Although linear regression is not expcted to do a good job modelling this data, I attempted it just to see variable correlations and interactions.  
+
+```{r}
+lm_model = lm(formula = fare_amount~. , data = train_data[, !(colnames(train_data) %in% c("tip_amount", "flocationID"))])
+
+summary(lm_model)
+
+
+```  
+  
+```{r}
+# 
+# library(MASS)
+# 
+# lm_model_aic = stepAIC(lm_model, direction = "both")
+# 
+# summary(lm_model_aic)
+# 
+# #par(mfrow = c(2,2))
+# #plot(lm_model_aic)
+
+```  
+
+**Multi-colinearity Detection**    
+  
+A VIF > 4 means that there are signs of multi-collinearity and anything greater than 10 means that an explanatory variable should be dropped.    
+
+```{r}
+
+library(car)
+
+vif(lm_model)
+
+```   
+  
+```{r}
+# prediction on test dat
+preds_lm = predict(lm_model, test_data)
+
+regr.eval(test_data$fare_amount, preds_lm)
+```  
+  
+Surprisingly linear regression performs good!  
+   
+   
+#### Decision Tree modelling  
+  
+```{r}
+library(rpart)
+
+cart_model = rpart(fare_amount ~ ., data = train_data[, !(colnames(train_data) == "tip_amount")])
+
+cart_model$variable.importance
+```
+
+
+```{r}
+barplot(cart_model$variable.importance)
+```
+
+
+```{r}
+printcp(cart_model)
+```  
+
+```{r}
+plotcp(cart_model)
+
+# Hence the default cp of 0.01 is appropriate. 
+```  
+
+  
+```{r message=FALSE, warning=FALSE}
+library(rpart.plot)
+
+rpart.plot(cart_model)
+```  
+  
+```{r}
+library(rattle)
+asRules(cart_model)
+
+```  
+  
+```{r}
+# prediction on test data
+preds_reg = predict(cart_model, test_data)
+
+library(DMwR)
+
+regr.eval(test_data$fare_amount, preds_reg)
+
+```  
+  
+
+```{r}
+library(h2o)
+h2o.init(nthreads = -1)
+train_data.hex = as.h2o(train_data,destination_frame = "train_data.hex")
+train_data.gbm = h2o.gbm(y = "fare_amount", x = setdiff(colnames(train_data), c("fare_amount", "tip_amount")), training_frame = train_data.hex, ntrees = 10, max_depth = 3,min_rows = 2, learn_rate = 0.2, distribution= "gaussian")
+
+train_data.gbm@model$scoring_history
+train_data.gbm
+```    
+
+**modelling for tip amount**  
+  
+```{r}
+cart_model_tip = rpart(tip_amount ~ ., data = train_data)
+library(rpart.plot)
+cart_model_tip$variable.importance
+rpart.plot(cart_model_tip)
+```  
+
+
+```{r}
+# prediction on test data
+preds_reg_tip = predict(cart_model_tip, test_data)
+
+library(DMwR)
+
+regr.eval(test_data$tip_amount, preds_reg_tip)
+
+```  
+
+
+
+
+##5.  Conclusions
+
+
+
+ 
+
+##6.  References:   
+1.  https://en.wikipedia.org/wiki/Taxicabs_of_the_United_States (last accessed August 30, 2018)  
+2. http://home.nyc.gov/html/tlc/html/industry/taxicab_rate_yellow.shtml  
+3.  www.nyc.gov (last accessed September 3, 2018)   
+4.  ggmap - https://rpubs.com/jhofman/nycmaps (last accessed August 31, 2018)  
+
